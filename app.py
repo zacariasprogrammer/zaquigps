@@ -1,114 +1,126 @@
-import sqlite3
 from flask import Flask, request, jsonify
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS
+import psycopg2
+import jwt
+import datetime
+import os
+import werkzeug.security as security
 
 app = Flask(__name__)
+CORS(app)
+
+SECRET_KEY = os.environ.get('JWT_SECRET', 'zaqui_gps_secret_2026')
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def get_db_connection():
+    # Renders PostgreSQL URLs use 'postgres://' but psycopg2 expects 'postgresql://'
+    url = DATABASE_URL
+    if url and url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url)
 
 def init_db():
-    conn = sqlite3.connect('users.db')
+    if not DATABASE_URL:
+        print("No DATABASE_URL found. Skipping DB init.")
+        return
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT DEFAULT 'user'
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE
         )
     ''')
-    
-    cursor.execute("SELECT id, role FROM users WHERE username = 'admin'")
-    existing_admin = cursor.fetchone()
-    
-    if not existing_admin:
-        hashed_admin_pw = generate_password_hash("admin123")
-        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", 
-                       ('admin', hashed_admin_pw, 'admin'))
-    elif existing_admin[1] != 'admin':
-        cursor.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
-        
     conn.commit()
+    cursor.close()
     conn.close()
 
 init_db()
 
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({"status": "online", "message": "ZaquiGPS™ Backend API is Running!"}), 200
-
-@app.route('/api/auth', methods=['POST'])
-def auth():
+@app.route('/api/auth/register', methods=['POST'])
+def register():
     data = request.get_json() or {}
-    action = request.args.get('action', '')
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
+    username = data.get('username')
+    password = data.get('password')
 
     if not username or not password:
-        return jsonify({"status": "error", "message": "Missing username or password."}), 400
+        return jsonify({'success': False, 'message': 'Username and password required'}), 400
 
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
+    hashed = security.generate_password_hash(password)
 
-    if action == 'register':
-        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
-        if cursor.fetchone():
-            conn.close()
-            return jsonify({"status": "error", "message": "Username already taken."}), 409
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        user_count = cursor.fetchone()[0]
+        is_admin = True if user_count == 0 else False
 
-        role = 'admin' if username == 'admin' else 'user'
-        hashed_pw = generate_password_hash(password)
-        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, hashed_pw, role))
+        cursor.execute('INSERT INTO users (username, password_hash, is_admin) VALUES (%s, %s, %s)',
+                       (username, hashed, is_admin))
         conn.commit()
+        cursor.close()
         conn.close()
-        return jsonify({"status": "success", "message": "Account created successfully!", "role": role}), 201
+        return jsonify({'success': True, 'message': 'User registered successfully'})
+    except psycopg2.IntegrityError:
+        return jsonify({'success': False, 'message': 'Username already exists'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': 'Database error'}), 500
 
-    elif action == 'login':
-        cursor.execute("SELECT password, role FROM users WHERE username = ?", (username,))
-        user = cursor.fetchone()
-        conn.close()
-
-        if user and check_password_hash(user[0], password):
-            return jsonify({
-                "status": "success", 
-                "message": "Login successful!",
-                "role": user[1]
-            }), 200
-        else:
-            return jsonify({"status": "error", "message": "Invalid credentials."}), 401
-
-    conn.close()
-    return jsonify({"status": "error", "message": "Invalid action."}), 400
-
-@app.route('/api/admin/users', methods=['GET'])
-def get_users():
-    admin_user = request.headers.get('X-Admin-User')
-    if admin_user != 'admin':
-        return jsonify({"status": "error", "message": "Unauthorized"}), 403
-
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, role FROM users")
-    users = [{"id": row[0], "username": row[1], "role": row[2]} for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({"status": "success", "users": users}), 200
-
-@app.route('/api/admin/delete', methods=['POST'])
-def delete_user():
+@app.route('/api/auth/login', methods=['POST'])
+def login():
     data = request.get_json() or {}
-    target_user = data.get('username')
-    admin_user = request.headers.get('X-Admin-User')
+    username = data.get('username')
+    password = data.get('password')
 
-    if admin_user != 'admin':
-        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT password_hash, is_admin FROM users WHERE username = %s', (username,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
 
-    if target_user == 'admin':
-        return jsonify({"status": "error", "message": "Cannot delete primary admin."}), 400
+        if row and security.check_password_hash(row[0], password):
+            token = jwt.encode({
+                'username': username,
+                'is_admin': row[1],
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            }, SECRET_KEY, algorithm='HS256')
 
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE username = ?", (target_user,))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success", "message": f"User {target_user} deleted."}), 200
+            return jsonify({'success': True, 'token': token, 'isAdmin': row[1]})
+
+        return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
+    except Exception as e:
+        return jsonify({'success': False, 'message': 'Database error'}), 500
+
+@app.route('/api/admin', methods=['GET'])
+def admin():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'success': False, 'message': 'Missing token'}), 401
+
+    token = auth_header.split(' ')[1]
+    try:
+        decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        if not decoded.get('is_admin'):
+            return jsonify({'success': False, 'message': 'Admin privilege required'}), 403
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+
+        return jsonify({'success': True, 'user_count': count})
+    except jwt.ExpiredSignatureError:
+        return jsonify({'success': False, 'message': 'Token expired'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'success': False, 'message': 'Invalid token'}), 401
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
