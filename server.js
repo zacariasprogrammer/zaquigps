@@ -1,32 +1,4 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const speakeasy = require('speakeasy');
-const rateLimit = require('express-rate-limit');
-const cors = require('cors');
-const nodemailer = require('nodemailer');
-const axios = require('axios');
-
-const app = express();
-app.use(express.json());
-
-// Enable CORS for your ZaquiGPS frontend
-app.use(cors({
-  origin: '*', // Replace '*' with your actual GitHub Pages / frontend domain in production
-  methods: ['GET', 'POST']
-}));
-
-const JWT_SECRET = process.env.JWT_SECRET || "zaquigps_super_secret_key";
-const PORT = process.env.PORT || 10000; // Render automatically sets process.env.PORT
-
-// Mock User Database (In production, connect to a free MongoDB Atlas or Supabase PostgreSQL instance)
-const usersDB = {};
-
-// Nodemailer Transporter Configuration
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.zacariasdejesusallentorres457@gmail.com, // Your Gmail address
+.com, // Your Gmail address
     pass: process.env.ubpnsbrkhvdlwart // Your Gmail App Password
   }
 });
@@ -147,13 +119,4 @@ app.post('/api/auth/setup-2fa', (req, res) => {
     const user = usersDB[decoded.email];
 
     const secret = speakeasy.generateSecret({ name: `ZaquiGPS (${user.email})` });
-    user.twoFactorSecret = secret.base32;
-    user.twoFactorEnabled = true;
-
-    res.json({ secret: secret.base32, otpauth_url: secret.otpauth_url });
-  } catch (err) {
-    res.status(401).json({ message: "Invalid or expired token." });
-  }
-});
-
-app.listen(PORT, () => console.log(`ZaquiGPS Auth Server running on port ${PORT}`));
+    user.twoFactorSecret = secret.base32; running on port ${PORT}`));
