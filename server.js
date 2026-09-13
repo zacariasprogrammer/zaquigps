@@ -4,6 +4,8 @@ const jwt = require('jsonwebtoken');
 const speakeasy = require('speakeasy');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
@@ -19,6 +21,55 @@ const PORT = process.env.PORT || 10000; // Render automatically sets process.env
 
 // Mock User Database (In production, connect to a free MongoDB Atlas or Supabase PostgreSQL instance)
 const usersDB = {};
+
+// Nodemailer Transporter Configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER, // Your Gmail address
+    pass: process.env.EMAIL_PASS  // Your Gmail App Password
+  }
+});
+
+// Helper function to resolve location and dispatch security alert email
+async function sendSecurityAlertEmail(userEmail, clientIp) {
+  let locationStr = "Unknown Location";
+  try {
+    // Resolve IP geolocation using ip-api.com
+    const geoRes = await axios.get(`http://ip-api.com/json/${clientIp}`);
+    if (geoRes.data && geoRes.data.status === 'success') {
+      locationStr = `${geoRes.data.city}, ${geoRes.data.regionName}, ${geoRes.data.country}`;
+    }
+  } catch (err) {
+    console.error("IP Geolocation lookup failed:", err.message);
+  }
+
+  const alertEmailOptions = {
+    from: '"ZaquiGPS Security" <no-reply@zaquigps.com>',
+    to: userEmail,
+    subject: '⚠️ Security Alert: New Login to Your ZaquiGPS Account',
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0a0a0c; color: #ffffff; padding: 24px; border-radius: 16px;">
+        <h2 style="color: #00d2ff; margin-bottom: 16px;">ZaquiGPS Security Alert</h2>
+        <p style="font-size: 15px; color: #e5e5ea;">A new sign-in attempt was detected on your account.</p>
+        
+        <div style="background-color: #1c1c1e; padding: 16px; border-radius: 12px; margin: 20px 0; border: 1px solid rgba(255,255,255,0.1);">
+          <p style="margin: 6px 0; font-size: 14px;"><strong>IP Address:</strong> <span style="color: #30d158;">${clientIp}</span></p>
+          <p style="margin: 6px 0; font-size: 14px;"><strong>Location:</strong> <span style="color: #ff9f0a;">${locationStr}</span></p>
+          <p style="margin: 6px 0; font-size: 14px;"><strong>Time:</strong> ${new Date().toUTCString()}</p>
+        </div>
+
+        <p style="font-size: 13px; color: #8e8e93;">If this was you, no action is needed. If you did not log in, someone may have compromised your password!</p>
+      </div>
+    `
+  };
+
+  try {
+    await transporter.sendMail(alertEmailOptions);
+  } catch (err) {
+    console.error("Failed to send security alert email:", err.message);
+  }
+}
 
 // Anti-Hack / Anti-Brute Force Rate Limiter
 const authLimiter = rateLimit({
@@ -52,7 +103,7 @@ app.post('/api/auth/signup', async (req, res) => {
   res.status(201).json({ token, user: { email, twoFactorEnabled: false } });
 });
 
-// Signin Route (with 2FA Verification)
+// Signin Route (with 2FA Verification & IP Security Alert Email)
 app.post('/api/auth/signin', async (req, res) => {
   const { email, password, twoFactorCode } = req.body;
   const user = usersDB[email];
@@ -60,6 +111,9 @@ app.post('/api/auth/signin', async (req, res) => {
   if (!user || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ message: "Invalid email or password." });
   }
+
+  // Extract client IP address (handles Render reverse proxies)
+  const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
 
   if (user.twoFactorEnabled) {
     if (!twoFactorCode) {
@@ -74,6 +128,9 @@ app.post('/api/auth/signin', async (req, res) => {
       return res.status(401).json({ message: "Invalid 2FA authentication code." });
     }
   }
+
+  // Dispatch background security alert email with IP & Location info
+  sendSecurityAlertEmail(user.email, clientIp);
 
   const token = jwt.sign({ email: user.email }, JWT_SECRET, { expiresIn: '1h' });
   res.json({ token, user: { email: user.email, twoFactorEnabled: user.twoFactorEnabled } });
