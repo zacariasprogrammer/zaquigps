@@ -160,5 +160,48 @@ app.post('/api/auth/setup-2fa', (req, res) => {
   }
 });
 
+// Rate limiter for the public route-alert email endpoint (prevents abuse)
+const emailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // Max 10 route-alert emails per IP per hour
+  message: { message: "Too many email requests. Try again later." }
+});
+
+// Route-saved email alert (Gmail SMTP).
+// The recipient is fixed server-side via ALERT_EMAIL_TO (falls back to EMAIL_USER)
+// and is NEVER taken from the client, so this endpoint can't be abused as an open relay.
+app.post('/api/send-email', emailLimiter, async (req, res) => {
+  const clean = (v) => (typeof v === 'string' ? v.slice(0, 200) : '');
+  const title = clean(req.body && req.body.routeTitle);
+  const dist = clean(req.body && req.body.routeDist);
+  const time = clean(req.body && req.body.routeTime);
+  if (!title) return res.status(400).json({ message: "routeTitle is required." });
+
+  const mailOptions = {
+    from: `"ZaquiGPS" <${process.env.EMAIL_USER}>`,
+    to: process.env.ALERT_EMAIL_TO || process.env.EMAIL_USER,
+    subject: 'ZaquiGPS Alert: Route saved to vault!',
+    text: `ZaquiGPS Alert: Route saved to vault!\nDestination: ${title}\nDistance: ${dist}\nTime: ${time}`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0a0a0c; color: #ffffff; padding: 24px; border-radius: 16px;">
+        <h2 style="color: #00d2ff; margin-bottom: 16px;">\u{1F9ED} Route saved to vault!</h2>
+        <div style="background-color: #1c1c1e; padding: 16px; border-radius: 12px; margin: 20px 0; border: 1px solid rgba(255,255,255,0.1);">
+          <p style="margin: 6px 0; font-size: 14px;"><strong>Destination:</strong> <span style="color: #30d158;">${title}</span></p>
+          <p style="margin: 6px 0; font-size: 14px;"><strong>Distance:</strong> <span style="color: #ff9f0a;">${dist}</span></p>
+          <p style="margin: 6px 0; font-size: 14px;"><strong>Time:</strong> <span style="color: #ff9f0a;">${time}</span></p>
+        </div>
+      </div>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Route alert email failed:", err.message);
+    res.status(500).json({ message: "Email failed to send." });
+  }
+});
+
 // Bind to host 0.0.0.0 for Render host routing
 app.listen(PORT, '0.0.0.0', () => console.log(`ZaquiGPS Auth Server running on port ${PORT}`));
